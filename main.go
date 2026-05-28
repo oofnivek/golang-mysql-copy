@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -557,14 +558,21 @@ func (p preset) name() string { return p.Name }
 // ── copy ──────────────────────────────────────────────────────────────────────
 
 func truncateTable(db *sql.DB, table string) error {
-	if _, err := db.Exec("SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
 		return fmt.Errorf("disabling foreign key checks: %w", err)
 	}
-	if _, err := db.Exec(fmt.Sprintf("TRUNCATE TABLE `%s`", table)); err != nil {
-		db.Exec("SET FOREIGN_KEY_CHECKS = 1") // best-effort re-enable
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE `%s`", table)); err != nil {
+		conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1") // best-effort re-enable
 		return fmt.Errorf("truncating table: %w", err)
 	}
-	if _, err := db.Exec("SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+	if _, err := conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
 		return fmt.Errorf("re-enabling foreign key checks: %w", err)
 	}
 	return nil
