@@ -13,11 +13,19 @@ import (
 )
 
 type dbConfig struct {
+	Name     string // empty for unsaved connections
 	Host     string
 	Port     string
 	User     string
 	Password string
 	Database string // populated after connecting, not from user input
+}
+
+func (c dbConfig) label() string {
+	if c.Name != "" {
+		return fmt.Sprintf("[%s] %s.%%s", c.Name, c.Database)
+	}
+	return fmt.Sprintf("%s.%%s", c.Database)
 }
 
 func (c dbConfig) dsn() string {
@@ -124,6 +132,7 @@ func promptConnection() (dbConfig, bool, error) {
 			for _, c := range conns {
 				if c.Name == choice {
 					return dbConfig{
+						Name:     c.Name,
 						Host:     c.Host,
 						Port:     c.Port,
 						User:     c.User,
@@ -173,15 +182,16 @@ func promptNewConnection() (dbConfig, error) {
 	}, err
 }
 
-func offerSave(cfg dbConfig) {
+// offerSave prompts to save a new connection and returns the name given (empty if skipped).
+func offerSave(cfg dbConfig) string {
 	var save bool
 	if err := survey.AskOne(&survey.Confirm{Message: "Save this connection for future use?"}, &save); err != nil || !save {
-		return
+		return ""
 	}
 
 	var name string
 	if err := survey.AskOne(&survey.Input{Message: "Connection name:"}, &name); err != nil || name == "" {
-		return
+		return ""
 	}
 
 	if err := saveConnection(savedConn{
@@ -192,9 +202,10 @@ func offerSave(cfg dbConfig) {
 		Password: cfg.Password,
 	}); err != nil {
 		fmt.Printf("  Warning: could not save connection: %v\n", err)
-	} else {
-		fmt.Printf("  Saved as %q\n", name)
+		return ""
 	}
+	fmt.Printf("  Saved as %q\n", name)
+	return name
 }
 
 // --- db helpers ---
@@ -386,7 +397,7 @@ func main() {
 	fmt.Println("OK")
 
 	if isNewSrc {
-		offerSave(srcCfg)
+		srcCfg.Name = offerSave(srcCfg)
 	}
 
 	srcCfg.Database, err = pickDatabase(srcDB)
@@ -421,7 +432,7 @@ func main() {
 	fmt.Println("OK")
 
 	if isNewDst {
-		offerSave(dstCfg)
+		dstCfg.Name = offerSave(dstCfg)
 	}
 
 	dstCfg.Database, err = pickDatabase(dstDB)
@@ -441,8 +452,9 @@ func main() {
 	// --- Confirm & copy ---
 	var confirm bool
 	err = survey.AskOne(&survey.Confirm{
-		Message: fmt.Sprintf("Copy %s.%s  →  %s.%s ?",
-			srcCfg.Database, srcTable, dstCfg.Database, dstTable),
+		Message: fmt.Sprintf("Copy %s  →  %s ?",
+			fmt.Sprintf(srcCfg.label(), srcTable),
+			fmt.Sprintf(dstCfg.label(), dstTable)),
 	}, &confirm)
 	if err != nil || !confirm {
 		fmt.Println("Cancelled.")
