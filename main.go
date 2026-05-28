@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"github.com/AlecAivazis/survey/v2"
 	_ "github.com/go-sql-driver/mysql"
 )
+
+var errBack = errors.New("back")
 
 type dbConfig struct {
 	Name     string // empty for unsaved connections
@@ -26,11 +29,6 @@ func (c dbConfig) label() string {
 		return fmt.Sprintf("[%s] %s.%%s", c.Name, c.Database)
 	}
 	return fmt.Sprintf("%s.%%s", c.Database)
-}
-
-func (c dbConfig) dsn() string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true",
-		c.User, c.Password, c.Host, c.Port, c.Database)
 }
 
 func (c dbConfig) serverDSN() string {
@@ -83,7 +81,6 @@ func saveConnection(conn savedConn) error {
 
 	conns, _ := loadConnections()
 
-	// replace existing entry with the same name, otherwise append
 	replaced := false
 	for i, c := range conns {
 		if c.Name == conn.Name {
@@ -100,13 +97,15 @@ func saveConnection(conn savedConn) error {
 	if err != nil {
 		return err
 	}
-	// 0600 — readable only by the current user
 	return os.WriteFile(path, data, 0600)
 }
 
 // --- connection prompts ---
 
-const newConnOption = "Enter new connection"
+const (
+	newConnOption = "Enter new connection"
+	backOption    = "← Back"
+)
 
 // promptConnection shows saved connections (if any) and lets the user pick one
 // or enter new details. Returns the config and whether it is newly entered.
@@ -222,6 +221,8 @@ func openDB(cfg dbConfig) (*sql.DB, error) {
 	return db, nil
 }
 
+// pickDatabase lists databases and lets the user pick one.
+// Returns errBack if the user chooses ← Back.
 func pickDatabase(db *sql.DB) (string, error) {
 	rows, err := db.Query("SHOW DATABASES")
 	if err != nil {
@@ -244,18 +245,22 @@ func pickDatabase(db *sql.DB) (string, error) {
 		return "", fmt.Errorf("no databases found")
 	}
 
-	var database string
+	options := append([]string{backOption}, databases...)
+	var choice string
 	if err := survey.AskOne(&survey.Select{
 		Message: "Select database:",
-		Options: databases,
-	}, &database); err != nil {
+		Options: options,
+	}, &choice); err != nil {
 		return "", err
 	}
+	if choice == backOption {
+		return "", errBack
+	}
 
-	if _, err := db.Exec(fmt.Sprintf("USE `%s`", database)); err != nil {
+	if _, err := db.Exec(fmt.Sprintf("USE `%s`", choice)); err != nil {
 		return "", fmt.Errorf("switching to database: %w", err)
 	}
-	return database, nil
+	return choice, nil
 }
 
 func listTables(db *sql.DB) ([]string, error) {
@@ -276,6 +281,8 @@ func listTables(db *sql.DB) ([]string, error) {
 	return tables, rows.Err()
 }
 
+// pickTable lists tables and lets the user pick one.
+// Returns errBack if the user chooses ← Back.
 func pickTable(db *sql.DB, prompt string) (string, error) {
 	tables, err := listTables(db)
 	if err != nil {
@@ -285,12 +292,68 @@ func pickTable(db *sql.DB, prompt string) (string, error) {
 		return "", fmt.Errorf("no tables found in database")
 	}
 
-	var table string
-	err = survey.AskOne(&survey.Select{
+	options := append([]string{backOption}, tables...)
+	var choice string
+	if err := survey.AskOne(&survey.Select{
 		Message: prompt,
-		Options: tables,
-	}, &table)
-	return table, err
+		Options: options,
+	}, &choice); err != nil {
+		return "", err
+	}
+	if choice == backOption {
+		return "", errBack
+	}
+	return choice, nil
+}
+
+// setupSide runs the full connection → database → table flow for one side
+// (source or destination), looping back whenever the user picks ← Back or a
+// connection test fails.
+func setupSide(label string) (*sql.DB, dbConfig, string, error) {
+connLoop:
+	for {
+		fmt.Printf("%s database:\n", label)
+		cfg, isNew, err := promptConnection()
+		if err != nil {
+			return nil, dbConfig{}, "", err
+		}
+
+		fmt.Print("Testing connection... ")
+		db, err := openDB(cfg)
+		if err != nil {
+			fmt.Printf("FAILED\n  %v\n\n", err)
+			continue connLoop
+		}
+		fmt.Println("OK")
+
+		if isNew {
+			cfg.Name = offerSave(cfg)
+		}
+
+		for {
+			database, err := pickDatabase(db)
+			if errors.Is(err, errBack) {
+				db.Close()
+				fmt.Println()
+				continue connLoop
+			}
+			if err != nil {
+				return nil, dbConfig{}, "", err
+			}
+			cfg.Database = database
+
+			for {
+				table, err := pickTable(db, fmt.Sprintf("Select %s table:", strings.ToLower(label)))
+				if errors.Is(err, errBack) {
+					break // re-pick database
+				}
+				if err != nil {
+					return nil, dbConfig{}, "", err
+				}
+				return db, cfg, table, nil
+			}
+		}
+	}
 }
 
 // --- copy ---
@@ -379,77 +442,24 @@ func main() {
 	fmt.Println("=== MySQL Table Copy ===")
 	fmt.Println()
 
-	// --- Source ---
-	fmt.Println("Source database:")
-	srcCfg, isNewSrc, err := promptConnection()
+	srcDB, srcCfg, srcTable, err := setupSide("Source")
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
-		return
-	}
-
-	fmt.Print("Testing source connection... ")
-	srcDB, err := openDB(srcCfg)
-	if err != nil {
-		fmt.Printf("FAILED\n  %v\n", err)
 		return
 	}
 	defer srcDB.Close()
-	fmt.Println("OK")
-
-	if isNewSrc {
-		srcCfg.Name = offerSave(srcCfg)
-	}
-
-	srcCfg.Database, err = pickDatabase(srcDB)
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
-
-	srcTable, err := pickTable(srcDB, "Select source table:")
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
 
 	fmt.Println()
 
-	// --- Destination ---
-	fmt.Println("Destination database:")
-	dstCfg, isNewDst, err := promptConnection()
+	dstDB, dstCfg, dstTable, err := setupSide("Destination")
 	if err != nil {
 		fmt.Printf("error: %v\n", err)
-		return
-	}
-
-	fmt.Print("Testing destination connection... ")
-	dstDB, err := openDB(dstCfg)
-	if err != nil {
-		fmt.Printf("FAILED\n  %v\n", err)
 		return
 	}
 	defer dstDB.Close()
-	fmt.Println("OK")
-
-	if isNewDst {
-		dstCfg.Name = offerSave(dstCfg)
-	}
-
-	dstCfg.Database, err = pickDatabase(dstDB)
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
-
-	dstTable, err := pickTable(dstDB, "Select destination table:")
-	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
 
 	fmt.Println()
 
-	// --- Confirm & copy ---
 	var confirm bool
 	err = survey.AskOne(&survey.Confirm{
 		Message: fmt.Sprintf("Copy %s  →  %s ?",
