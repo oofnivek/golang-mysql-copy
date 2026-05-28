@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/AlecAivazis/survey/v2"
@@ -19,7 +20,7 @@ var errBack = errors.New("back")
 // ── types ────────────────────────────────────────────────────────────────────
 
 type dbConfig struct {
-	Name     string // empty for unsaved connections
+	Name     string
 	Host     string
 	Port     string
 	User     string
@@ -81,7 +82,6 @@ func saveConnection(conn savedConn) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-
 	conns, _ := loadConnections()
 	replaced := false
 	for i, c := range conns {
@@ -94,7 +94,6 @@ func saveConnection(conn savedConn) error {
 	if !replaced {
 		conns = append(conns, conn)
 	}
-
 	data, err := json.MarshalIndent(conns, "", "  ")
 	if err != nil {
 		return err
@@ -147,8 +146,8 @@ func loadPresets() ([]preset, error) {
 	if err != nil {
 		return nil, err
 	}
-	var presets []preset
-	return presets, json.Unmarshal(data, &presets)
+	var ps []preset
+	return ps, json.Unmarshal(data, &ps)
 }
 
 func savePreset(p preset) error {
@@ -159,25 +158,112 @@ func savePreset(p preset) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-
-	presets, _ := loadPresets()
+	ps, _ := loadPresets()
 	replaced := false
-	for i, existing := range presets {
+	for i, existing := range ps {
 		if existing.Name == p.Name {
-			presets[i] = p
+			ps[i] = p
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		presets = append(presets, p)
+		ps = append(ps, p)
 	}
-
-	data, err := json.MarshalIndent(presets, "", "  ")
+	sort.Slice(ps, func(i, j int) bool { return ps[i].Name < ps[j].Name })
+	data, err := json.MarshalIndent(ps, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "presets.json"), data, 0600)
+}
+
+func findPreset(name string) (preset, bool) {
+	ps, _ := loadPresets()
+	for _, p := range ps {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return preset{}, false
+}
+
+// ── groups ────────────────────────────────────────────────────────────────────
+
+type group struct {
+	Name        string   `json:"name"`
+	Concurrency int      `json:"concurrency"`
+	Presets     []string `json:"presets"`
+}
+
+func (g group) summary() string {
+	parallel := "sequential"
+	if g.Concurrency > 1 {
+		parallel = fmt.Sprintf("%d parallel", g.Concurrency)
+	}
+	return fmt.Sprintf("%d presets · %s", len(g.Presets), parallel)
+}
+
+func loadGroups() ([]group, error) {
+	dir, err := configDir()
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "groups.json"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var gs []group
+	return gs, json.Unmarshal(data, &gs)
+}
+
+func saveGroup(g group) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	gs, _ := loadGroups()
+	replaced := false
+	for i, existing := range gs {
+		if existing.Name == g.Name {
+			gs[i] = g
+			replaced = true
+			break
+		}
+	}
+	if !replaced {
+		gs = append(gs, g)
+	}
+	data, err := json.MarshalIndent(gs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "groups.json"), data, 0600)
+}
+
+func deleteGroup(name string) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	gs, _ := loadGroups()
+	filtered := gs[:0]
+	for _, g := range gs {
+		if g.Name != name {
+			filtered = append(filtered, g)
+		}
+	}
+	data, err := json.MarshalIndent(filtered, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "groups.json"), data, 0600)
 }
 
 // ── connection prompts ────────────────────────────────────────────────────────
@@ -231,14 +317,12 @@ func promptNewConnection() (dbConfig, error) {
 		User     string
 		Password string
 	}{}
-
 	err := survey.Ask([]*survey.Question{
 		{Name: "host", Prompt: &survey.Input{Message: "Host:", Default: "localhost"}},
 		{Name: "port", Prompt: &survey.Input{Message: "Port:", Default: "3306"}},
 		{Name: "user", Prompt: &survey.Input{Message: "User:"}},
 		{Name: "password", Prompt: &survey.Password{Message: "Password:"}},
 	}, &answers)
-
 	return dbConfig{
 		Host:     answers.Host,
 		Port:     answers.Port,
@@ -247,24 +331,18 @@ func promptNewConnection() (dbConfig, error) {
 	}, err
 }
 
-// offerSave prompts to save a new connection and returns the name given (empty if skipped).
 func offerSave(cfg dbConfig) string {
 	var save bool
 	if err := survey.AskOne(&survey.Confirm{Message: "Save this connection for future use?"}, &save); err != nil || !save {
 		return ""
 	}
-
 	var name string
 	if err := survey.AskOne(&survey.Input{Message: "Connection name:"}, &name); err != nil || name == "" {
 		return ""
 	}
-
 	if err := saveConnection(savedConn{
-		Name:     name,
-		Host:     cfg.Host,
-		Port:     cfg.Port,
-		User:     cfg.User,
-		Password: cfg.Password,
+		Name: name, Host: cfg.Host, Port: cfg.Port,
+		User: cfg.User, Password: cfg.Password,
 	}); err != nil {
 		fmt.Printf("  Warning: could not save connection: %v\n", err)
 		return ""
@@ -273,8 +351,6 @@ func offerSave(cfg dbConfig) string {
 	return name
 }
 
-// ensureNamed ensures the config has a saved name (prompting if needed).
-// Required before saving a preset, since presets reference connections by name.
 func ensureNamed(cfg dbConfig) dbConfig {
 	if cfg.Name != "" {
 		return cfg
@@ -285,11 +361,8 @@ func ensureNamed(cfg dbConfig) dbConfig {
 		return cfg
 	}
 	if err := saveConnection(savedConn{
-		Name:     name,
-		Host:     cfg.Host,
-		Port:     cfg.Port,
-		User:     cfg.User,
-		Password: cfg.Password,
+		Name: name, Host: cfg.Host, Port: cfg.Port,
+		User: cfg.User, Password: cfg.Password,
 	}); err != nil {
 		fmt.Printf("  Warning: could not save connection: %v\n", err)
 		return cfg
@@ -298,36 +371,27 @@ func ensureNamed(cfg dbConfig) dbConfig {
 	return cfg
 }
 
-// offerSavePreset prompts to save the current copy config as a named preset.
 func offerSavePreset(srcCfg dbConfig, srcTable string, dstCfg dbConfig, dstTable string, truncate bool) {
 	var save bool
 	if err := survey.AskOne(&survey.Confirm{Message: "Save this as a preset for future reuse?"}, &save); err != nil || !save {
 		return
 	}
-
 	srcCfg = ensureNamed(srcCfg)
 	dstCfg = ensureNamed(dstCfg)
 	if srcCfg.Name == "" || dstCfg.Name == "" {
 		fmt.Println("  Preset not saved (connections need names).")
 		return
 	}
-
 	var name string
 	if err := survey.AskOne(&survey.Input{Message: "Preset name:"}, &name); err != nil || name == "" {
 		return
 	}
-
-	p := preset{
+	if err := savePreset(preset{
 		Name:          name,
-		SrcConnection: srcCfg.Name,
-		SrcDatabase:   srcCfg.Database,
-		SrcTable:      srcTable,
-		DstConnection: dstCfg.Name,
-		DstDatabase:   dstCfg.Database,
-		DstTable:      dstTable,
-		Truncate:      truncate,
-	}
-	if err := savePreset(p); err != nil {
+		SrcConnection: srcCfg.Name, SrcDatabase: srcCfg.Database, SrcTable: srcTable,
+		DstConnection: dstCfg.Name, DstDatabase: dstCfg.Database, DstTable: dstTable,
+		Truncate: truncate,
+	}); err != nil {
 		fmt.Printf("  Warning: could not save preset: %v\n", err)
 		return
 	}
@@ -354,7 +418,6 @@ func pickDatabase(db *sql.DB) (string, error) {
 		return "", fmt.Errorf("listing databases: %w", err)
 	}
 	defer rows.Close()
-
 	var databases []string
 	for rows.Next() {
 		var d string
@@ -369,19 +432,14 @@ func pickDatabase(db *sql.DB) (string, error) {
 	if len(databases) == 0 {
 		return "", fmt.Errorf("no databases found")
 	}
-
 	options := append([]string{backOption}, databases...)
 	var choice string
-	if err := survey.AskOne(&survey.Select{
-		Message: "Select database:",
-		Options: options,
-	}, &choice); err != nil {
+	if err := survey.AskOne(&survey.Select{Message: "Select database:", Options: options}, &choice); err != nil {
 		return "", err
 	}
 	if choice == backOption {
 		return "", errBack
 	}
-
 	if _, err := db.Exec(fmt.Sprintf("USE `%s`", choice)); err != nil {
 		return "", fmt.Errorf("switching to database: %w", err)
 	}
@@ -394,7 +452,6 @@ func listTables(db *sql.DB) ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var tables []string
 	for rows.Next() {
 		var t string
@@ -414,13 +471,9 @@ func pickTable(db *sql.DB, prompt string) (string, error) {
 	if len(tables) == 0 {
 		return "", fmt.Errorf("no tables found in database")
 	}
-
 	options := append([]string{backOption}, tables...)
 	var choice string
-	if err := survey.AskOne(&survey.Select{
-		Message: prompt,
-		Options: options,
-	}, &choice); err != nil {
+	if err := survey.AskOne(&survey.Select{Message: prompt, Options: options}, &choice); err != nil {
 		return "", err
 	}
 	if choice == backOption {
@@ -429,8 +482,6 @@ func pickTable(db *sql.DB, prompt string) (string, error) {
 	return choice, nil
 }
 
-// setupSide runs the connection → database → table flow for one side,
-// looping back whenever the user picks ← Back or a connection test fails.
 func setupSide(label string) (*sql.DB, dbConfig, string, error) {
 connLoop:
 	for {
@@ -439,7 +490,6 @@ connLoop:
 		if err != nil {
 			return nil, dbConfig{}, "", err
 		}
-
 		fmt.Print("Testing connection... ")
 		db, err := openDB(cfg)
 		if err != nil {
@@ -447,11 +497,9 @@ connLoop:
 			continue connLoop
 		}
 		fmt.Println("OK")
-
 		if isNew {
 			cfg.Name = offerSave(cfg)
 		}
-
 		for {
 			database, err := pickDatabase(db)
 			if errors.Is(err, errBack) {
@@ -463,11 +511,10 @@ connLoop:
 				return nil, dbConfig{}, "", err
 			}
 			cfg.Database = database
-
 			for {
 				table, err := pickTable(db, fmt.Sprintf("Select %s table:", strings.ToLower(label)))
 				if errors.Is(err, errBack) {
-					break // re-pick database
+					break
 				}
 				if err != nil {
 					return nil, dbConfig{}, "", err
@@ -478,83 +525,6 @@ connLoop:
 	}
 }
 
-// ── run preset ────────────────────────────────────────────────────────────────
-
-func runPreset(p preset) {
-	fmt.Printf("Preset: %s\n", p.name())
-	fmt.Println()
-
-	srcSaved, ok := findConnection(p.SrcConnection)
-	if !ok {
-		fmt.Printf("error: saved connection %q not found — edit ~/.mysql-copy/connections.json\n", p.SrcConnection)
-		return
-	}
-	dstSaved, ok := findConnection(p.DstConnection)
-	if !ok {
-		fmt.Printf("error: saved connection %q not found — edit ~/.mysql-copy/connections.json\n", p.DstConnection)
-		return
-	}
-
-	fmt.Print("Connecting to source... ")
-	srcDB, err := openDB(dbConfig{Host: srcSaved.Host, Port: srcSaved.Port, User: srcSaved.User, Password: srcSaved.Password})
-	if err != nil {
-		fmt.Printf("FAILED\n  %v\n", err)
-		return
-	}
-	defer srcDB.Close()
-	if _, err := srcDB.Exec(fmt.Sprintf("USE `%s`", p.SrcDatabase)); err != nil {
-		fmt.Printf("FAILED\n  %v\n", err)
-		return
-	}
-	fmt.Println("OK")
-
-	fmt.Print("Connecting to destination... ")
-	dstDB, err := openDB(dbConfig{Host: dstSaved.Host, Port: dstSaved.Port, User: dstSaved.User, Password: dstSaved.Password})
-	if err != nil {
-		fmt.Printf("FAILED\n  %v\n", err)
-		return
-	}
-	defer dstDB.Close()
-	if _, err := dstDB.Exec(fmt.Sprintf("USE `%s`", p.DstDatabase)); err != nil {
-		fmt.Printf("FAILED\n  %v\n", err)
-		return
-	}
-	fmt.Println("OK")
-	fmt.Println()
-
-	truncateNote := ""
-	if p.Truncate {
-		truncateNote = " (will truncate destination first)"
-	}
-	var confirm bool
-	if err := survey.AskOne(&survey.Confirm{
-		Message: fmt.Sprintf("Copy [%s] %s.%s  →  [%s] %s.%s%s ?",
-			p.SrcConnection, p.SrcDatabase, p.SrcTable,
-			p.DstConnection, p.DstDatabase, p.DstTable,
-			truncateNote),
-	}, &confirm); err != nil || !confirm {
-		fmt.Println("Cancelled.")
-		return
-	}
-
-	if p.Truncate {
-		fmt.Printf("Truncating %s.%s...\n", p.DstDatabase, p.DstTable)
-		if err := truncateTable(dstDB, p.DstTable); err != nil {
-			fmt.Printf("error: %v\n", err)
-			return
-		}
-	}
-
-	fmt.Println("Copying...")
-	if err := copyTable(srcDB, p.SrcTable, dstDB, p.DstTable); err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
-	}
-	fmt.Println("Done!")
-}
-
-func (p preset) name() string { return p.Name }
-
 // ── copy ──────────────────────────────────────────────────────────────────────
 
 func truncateTable(db *sql.DB, table string) error {
@@ -564,7 +534,6 @@ func truncateTable(db *sql.DB, table string) error {
 		return fmt.Errorf("acquiring connection: %w", err)
 	}
 	defer conn.Close()
-
 	if _, err := conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
 		return fmt.Errorf("disabling foreign key checks: %w", err)
 	}
@@ -619,8 +588,9 @@ func copyTable(srcDB *sql.DB, srcTable string, dstDB *sql.DB, dstTable string) e
 			phs[i] = placeholder
 			args = append(args, row...)
 		}
-		query := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES %s", dstTable, colList, strings.Join(phs, ","))
-		_, err := dstDB.Exec(query, args...)
+		_, err := dstDB.Exec(
+			fmt.Sprintf("INSERT INTO `%s` (%s) VALUES %s", dstTable, colList, strings.Join(phs, ",")),
+			args...)
 		return err
 	}
 
@@ -632,12 +602,11 @@ func copyTable(srcDB *sql.DB, srcTable string, dstDB *sql.DB, dstTable string) e
 		copy(row, vals)
 		batch = append(batch, row)
 		total++
-
 		if len(batch) >= batchSize {
 			if err := flush(); err != nil {
 				return fmt.Errorf("inserting batch at row %d: %w", total, err)
 			}
-			fmt.Printf("\r  %d rows copied...", total)
+			fmt.Printf("\r    %d rows copied...", total)
 			batch = batch[:0]
 		}
 	}
@@ -647,105 +616,432 @@ func copyTable(srcDB *sql.DB, srcTable string, dstDB *sql.DB, dstTable string) e
 	if err := flush(); err != nil {
 		return fmt.Errorf("inserting final batch: %w", err)
 	}
-
 	if total == 0 {
-		fmt.Println("  Source table is empty, nothing to copy.")
+		fmt.Println("    source table is empty, nothing to copy.")
 	} else {
-		fmt.Printf("\r  %d rows copied.          \n", total)
+		fmt.Printf("\r    %d rows copied.          \n", total)
 	}
 	return nil
 }
 
-// ── main ──────────────────────────────────────────────────────────────────────
+// ── preset execution ──────────────────────────────────────────────────────────
 
-const newCopyOption = "Start new copy"
-
-func main() {
-	fmt.Println("=== MySQL Table Copy ===")
-	fmt.Println()
-
-	// If presets exist, offer to run one.
-	presets, _ := loadPresets()
-	if len(presets) > 0 {
-		optionMap := map[string]preset{}
-		options := []string{newCopyOption}
-		for _, p := range presets {
-			key := fmt.Sprintf("%-20s  %s", p.Name, p.summary())
-			options = append(options, key)
-			optionMap[key] = p
-		}
-
-		var choice string
-		if err := survey.AskOne(&survey.Select{
-			Message: "Run a preset or start a new copy?",
-			Options: options,
-		}, &choice); err != nil {
-			return
-		}
-
-		if p, ok := optionMap[choice]; ok {
-			fmt.Println()
-			runPreset(p)
-			return
-		}
-		fmt.Println()
+// execPreset connects and copies without prompting. Used by both runPreset and runGroup.
+func execPreset(p preset) error {
+	srcSaved, ok := findConnection(p.SrcConnection)
+	if !ok {
+		return fmt.Errorf("saved connection %q not found", p.SrcConnection)
+	}
+	dstSaved, ok := findConnection(p.DstConnection)
+	if !ok {
+		return fmt.Errorf("saved connection %q not found", p.DstConnection)
 	}
 
-	// New copy flow.
-	srcDB, srcCfg, srcTable, err := setupSide("Source")
+	fmt.Print("  Connecting to source... ")
+	srcDB, err := openDB(dbConfig{Host: srcSaved.Host, Port: srcSaved.Port, User: srcSaved.User, Password: srcSaved.Password})
 	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
+		return fmt.Errorf("source connection failed: %w", err)
 	}
 	defer srcDB.Close()
+	if _, err := srcDB.Exec(fmt.Sprintf("USE `%s`", p.SrcDatabase)); err != nil {
+		return fmt.Errorf("USE %s: %w", p.SrcDatabase, err)
+	}
+	fmt.Println("OK")
 
-	fmt.Println()
-
-	dstDB, dstCfg, dstTable, err := setupSide("Destination")
+	fmt.Print("  Connecting to destination... ")
+	dstDB, err := openDB(dbConfig{Host: dstSaved.Host, Port: dstSaved.Port, User: dstSaved.User, Password: dstSaved.Password})
 	if err != nil {
-		fmt.Printf("error: %v\n", err)
-		return
+		return fmt.Errorf("destination connection failed: %w", err)
 	}
 	defer dstDB.Close()
+	if _, err := dstDB.Exec(fmt.Sprintf("USE `%s`", p.DstDatabase)); err != nil {
+		return fmt.Errorf("USE %s: %w", p.DstDatabase, err)
+	}
+	fmt.Println("OK")
 
-	fmt.Println()
-
-	var truncate bool
-	if err := survey.AskOne(&survey.Confirm{
-		Message: fmt.Sprintf("Truncate destination (%s.%s) before copying?", dstCfg.Database, dstTable),
-	}, &truncate); err != nil {
-		return
+	if p.Truncate {
+		fmt.Printf("  Truncating %s.%s...\n", p.DstDatabase, p.DstTable)
+		if err := truncateTable(dstDB, p.DstTable); err != nil {
+			return err
+		}
 	}
 
+	fmt.Println("  Copying...")
+	return copyTable(srcDB, p.SrcTable, dstDB, p.DstTable)
+}
+
+// runPreset shows the preset details, asks for confirmation, then executes.
+func runPreset(p preset) {
+	fmt.Printf("Preset: %s\n  %s\n\n", p.Name, p.summary())
+
+	var confirm bool
 	truncateNote := ""
-	if truncate {
+	if p.Truncate {
 		truncateNote = " (will truncate destination first)"
 	}
-	var confirm bool
 	if err := survey.AskOne(&survey.Confirm{
-		Message: fmt.Sprintf("Copy %s  →  %s%s ?",
-			fmt.Sprintf(srcCfg.label(), srcTable),
-			fmt.Sprintf(dstCfg.label(), dstTable),
+		Message: fmt.Sprintf("Copy [%s] %s.%s  →  [%s] %s.%s%s ?",
+			p.SrcConnection, p.SrcDatabase, p.SrcTable,
+			p.DstConnection, p.DstDatabase, p.DstTable,
 			truncateNote),
 	}, &confirm); err != nil || !confirm {
 		fmt.Println("Cancelled.")
 		return
 	}
 
-	offerSavePreset(srcCfg, srcTable, dstCfg, dstTable, truncate)
-
-	if truncate {
-		fmt.Printf("Truncating %s.%s...\n", dstCfg.Database, dstTable)
-		if err := truncateTable(dstDB, dstTable); err != nil {
-			fmt.Printf("error: %v\n", err)
-			return
-		}
-	}
-
-	fmt.Println("Copying...")
-	if err := copyTable(srcDB, srcTable, dstDB, dstTable); err != nil {
+	if err := execPreset(p); err != nil {
 		fmt.Printf("error: %v\n", err)
 		return
 	}
 	fmt.Println("Done!")
+}
+
+// ── group management ──────────────────────────────────────────────────────────
+
+func promptGroupForm(existing *group) (group, error) {
+	allPresets, _ := loadPresets()
+	if len(allPresets) == 0 {
+		return group{}, fmt.Errorf("no presets available — create a preset first")
+	}
+
+	presetNames := make([]string, len(allPresets))
+	for i, p := range allPresets {
+		presetNames[i] = p.Name
+	}
+
+	defaultName := ""
+	defaultConcurrency := "1"
+	defaultSelected := []string{}
+	if existing != nil {
+		defaultName = existing.Name
+		defaultConcurrency = fmt.Sprintf("%d", existing.Concurrency)
+		defaultSelected = existing.Presets
+	}
+
+	var name string
+	if err := survey.AskOne(&survey.Input{
+		Message: "Group name:",
+		Default: defaultName,
+	}, &name); err != nil || name == "" {
+		return group{}, errBack
+	}
+
+	var concurrencyStr string
+	if err := survey.AskOne(&survey.Input{
+		Message: "Concurrency (how many presets to run in parallel):",
+		Default: defaultConcurrency,
+	}, &concurrencyStr); err != nil {
+		return group{}, err
+	}
+	concurrency := 1
+	fmt.Sscanf(concurrencyStr, "%d", &concurrency)
+	if concurrency < 1 {
+		concurrency = 1
+	}
+
+	var selected []string
+	if err := survey.AskOne(&survey.MultiSelect{
+		Message: "Select presets to include:",
+		Options: presetNames,
+		Default: defaultSelected,
+	}, &selected); err != nil {
+		return group{}, err
+	}
+	if len(selected) == 0 {
+		return group{}, fmt.Errorf("a group must have at least one preset")
+	}
+
+	return group{Name: name, Concurrency: concurrency, Presets: selected}, nil
+}
+
+func manageGroups() {
+	for {
+		gs, _ := loadGroups()
+
+		options := []string{"Create new group"}
+		for _, g := range gs {
+			options = append(options, fmt.Sprintf("%-20s  (%s)", g.Name, g.summary()))
+		}
+		options = append(options, backOption)
+
+		var choice string
+		if err := survey.AskOne(&survey.Select{
+			Message: "Manage groups:",
+			Options: options,
+		}, &choice); err != nil || choice == backOption {
+			return
+		}
+
+		if choice == "Create new group" {
+			g, err := promptGroupForm(nil)
+			if err != nil {
+				if !errors.Is(err, errBack) {
+					fmt.Printf("  error: %v\n", err)
+				}
+				continue
+			}
+			if err := saveGroup(g); err != nil {
+				fmt.Printf("  error saving group: %v\n", err)
+				continue
+			}
+			fmt.Printf("  Group %q saved.\n\n", g.Name)
+			continue
+		}
+
+		// A group was selected — show edit/delete submenu.
+		// Extract the group name (everything before the padding).
+		selectedName := strings.TrimSpace(strings.SplitN(choice, " ", 2)[0])
+		var selectedGroup group
+		for _, g := range gs {
+			if g.Name == selectedName {
+				selectedGroup = g
+				break
+			}
+		}
+
+		var action string
+		if err := survey.AskOne(&survey.Select{
+			Message: fmt.Sprintf("%q:", selectedGroup.Name),
+			Options: []string{"Edit", "Delete", backOption},
+		}, &action); err != nil || action == backOption {
+			continue
+		}
+
+		switch action {
+		case "Edit":
+			updated, err := promptGroupForm(&selectedGroup)
+			if err != nil {
+				if !errors.Is(err, errBack) {
+					fmt.Printf("  error: %v\n", err)
+				}
+				continue
+			}
+			// If the name changed, remove the old entry first.
+			if updated.Name != selectedGroup.Name {
+				deleteGroup(selectedGroup.Name)
+			}
+			if err := saveGroup(updated); err != nil {
+				fmt.Printf("  error saving group: %v\n", err)
+				continue
+			}
+			fmt.Printf("  Group %q saved.\n\n", updated.Name)
+
+		case "Delete":
+			var confirm bool
+			survey.AskOne(&survey.Confirm{
+				Message: fmt.Sprintf("Delete group %q?", selectedGroup.Name),
+			}, &confirm)
+			if confirm {
+				deleteGroup(selectedGroup.Name)
+				fmt.Printf("  Group %q deleted.\n\n", selectedGroup.Name)
+			}
+		}
+	}
+}
+
+// ── run group ─────────────────────────────────────────────────────────────────
+
+func runGroup(g group) {
+	fmt.Printf("Group: %s  (%s)\n\n", g.Name, g.summary())
+
+	// Resolve and display all presets before confirming.
+	ps := make([]preset, 0, len(g.Presets))
+	for _, name := range g.Presets {
+		p, ok := findPreset(name)
+		if !ok {
+			fmt.Printf("  warning: preset %q not found, skipping\n", name)
+			continue
+		}
+		truncNote := ""
+		if p.Truncate {
+			truncNote = "  (truncate)"
+		}
+		fmt.Printf("  • %-20s  %s\n", p.Name, p.summary()+truncNote)
+		ps = append(ps, p)
+	}
+	if len(ps) == 0 {
+		fmt.Println("No valid presets in this group.")
+		return
+	}
+
+	fmt.Println()
+	var confirm bool
+	if err := survey.AskOne(&survey.Confirm{
+		Message: fmt.Sprintf("Run %d preset(s)?", len(ps)),
+	}, &confirm); err != nil || !confirm {
+		fmt.Println("Cancelled.")
+		return
+	}
+	fmt.Println()
+
+	for i, p := range ps {
+		fmt.Printf("[%d/%d] %s\n", i+1, len(ps), p.Name)
+		if err := execPreset(p); err != nil {
+			fmt.Printf("  error: %v\n\n", err)
+			continue
+		}
+		fmt.Printf("  Done.\n\n")
+	}
+	fmt.Println("Group finished.")
+}
+
+// ── view presets ─────────────────────────────────────────────────────────────
+
+func viewPresets(ps []preset) {
+	fmt.Printf("Presets (%d):\n\n", len(ps))
+	for _, p := range ps {
+		truncate := ""
+		if p.Truncate {
+			truncate = "  truncate"
+		}
+		fmt.Printf("  %-22s [%s] %s.%s  →  [%s] %s.%s%s\n",
+			p.Name,
+			p.SrcConnection, p.SrcDatabase, p.SrcTable,
+			p.DstConnection, p.DstDatabase, p.DstTable,
+			truncate)
+	}
+	fmt.Println()
+	survey.AskOne(&survey.Input{Message: "Press Enter to go back"}, new(string))
+	fmt.Println()
+}
+
+// ── main ──────────────────────────────────────────────────────────────────────
+
+func main() {
+	fmt.Println("=== MySQL Table Copy ===")
+	fmt.Println()
+
+	presets, _ := loadPresets()
+	groups, _ := loadGroups()
+
+	// Build top-level menu dynamically based on what exists.
+	options := []string{}
+	if len(presets) > 0 {
+		options = append(options, "Run a preset")
+		options = append(options, "View presets")
+	}
+	if len(groups) > 0 {
+		options = append(options, "Run a group")
+	}
+	if len(presets) > 0 {
+		options = append(options, "Manage groups")
+	}
+	options = append(options, "Start new copy")
+
+	action := "Start new copy"
+	if len(options) > 1 {
+		if err := survey.AskOne(&survey.Select{
+			Message: "What would you like to do?",
+			Options: options,
+		}, &action); err != nil {
+			return
+		}
+	}
+	fmt.Println()
+
+	switch action {
+
+	case "Run a preset":
+		optionMap := map[string]preset{}
+		opts := make([]string, 0, len(presets)+1)
+		for _, p := range presets {
+			key := fmt.Sprintf("%-20s  %s", p.Name, p.summary())
+			opts = append(opts, key)
+			optionMap[key] = p
+		}
+		opts = append(opts, backOption)
+		var choice string
+		if err := survey.AskOne(&survey.Select{
+			Message: "Select preset:",
+			Options: opts,
+		}, &choice); err != nil || choice == backOption {
+			return
+		}
+		if p, ok := optionMap[choice]; ok {
+			fmt.Println()
+			runPreset(p)
+		}
+
+	case "View presets":
+		viewPresets(presets)
+
+	case "Run a group":
+		opts := make([]string, 0, len(groups)+1)
+		groupMap := map[string]group{}
+		for _, g := range groups {
+			key := fmt.Sprintf("%-20s  (%s)", g.Name, g.summary())
+			opts = append(opts, key)
+			groupMap[key] = g
+		}
+		opts = append(opts, backOption)
+		var choice string
+		if err := survey.AskOne(&survey.Select{
+			Message: "Select group:",
+			Options: opts,
+		}, &choice); err != nil || choice == backOption {
+			return
+		}
+		if g, ok := groupMap[choice]; ok {
+			fmt.Println()
+			runGroup(g)
+		}
+
+	case "Manage groups":
+		manageGroups()
+
+	case "Start new copy":
+		srcDB, srcCfg, srcTable, err := setupSide("Source")
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			return
+		}
+		defer srcDB.Close()
+		fmt.Println()
+
+		dstDB, dstCfg, dstTable, err := setupSide("Destination")
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+			return
+		}
+		defer dstDB.Close()
+		fmt.Println()
+
+		var truncate bool
+		if err := survey.AskOne(&survey.Confirm{
+			Message: fmt.Sprintf("Truncate destination (%s.%s) before copying?", dstCfg.Database, dstTable),
+		}, &truncate); err != nil {
+			return
+		}
+
+		truncateNote := ""
+		if truncate {
+			truncateNote = " (will truncate destination first)"
+		}
+		var confirm bool
+		if err := survey.AskOne(&survey.Confirm{
+			Message: fmt.Sprintf("Copy %s  →  %s%s ?",
+				fmt.Sprintf(srcCfg.label(), srcTable),
+				fmt.Sprintf(dstCfg.label(), dstTable),
+				truncateNote),
+		}, &confirm); err != nil || !confirm {
+			fmt.Println("Cancelled.")
+			return
+		}
+
+		offerSavePreset(srcCfg, srcTable, dstCfg, dstTable, truncate)
+
+		if truncate {
+			fmt.Printf("Truncating %s.%s...\n", dstCfg.Database, dstTable)
+			if err := truncateTable(dstDB, dstTable); err != nil {
+				fmt.Printf("error: %v\n", err)
+				return
+			}
+		}
+		fmt.Println("Copying...")
+		if err := copyTable(srcDB, srcTable, dstDB, dstTable); err != nil {
+			fmt.Printf("error: %v\n", err)
+			return
+		}
+		fmt.Println("Done!")
+	}
 }
