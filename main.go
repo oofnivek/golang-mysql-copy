@@ -911,137 +911,143 @@ func main() {
 	fmt.Println("=== MySQL Table Copy ===")
 	fmt.Println()
 
-	presets, _ := loadPresets()
-	groups, _ := loadGroups()
+	for {
+		presets, _ := loadPresets()
+		groups, _ := loadGroups()
 
-	// Build top-level menu dynamically based on what exists.
-	options := []string{}
-	if len(presets) > 0 {
-		options = append(options, "Run a preset")
-		options = append(options, "View presets")
-	}
-	if len(groups) > 0 {
-		options = append(options, "Run a group")
-	}
-	if len(presets) > 0 {
-		options = append(options, "Manage groups")
-	}
-	options = append(options, "Start new copy")
-
-	action := "Start new copy"
-	if len(options) > 1 {
-		if err := survey.AskOne(&survey.Select{
-			Message: "What would you like to do?",
-			Options: options,
-		}, &action); err != nil {
-			return
+		// Build top-level menu dynamically based on what exists.
+		options := []string{}
+		if len(presets) > 0 {
+			options = append(options, "Run a preset")
+			options = append(options, "View presets")
 		}
-	}
-	fmt.Println()
-
-	switch action {
-
-	case "Run a preset":
-		optionMap := map[string]preset{}
-		opts := make([]string, 0, len(presets)+1)
-		for _, p := range presets {
-			key := fmt.Sprintf("%-20s  %s", p.Name, p.summary())
-			opts = append(opts, key)
-			optionMap[key] = p
+		if len(groups) > 0 {
+			options = append(options, "Run a group")
 		}
-		opts = append(opts, backOption)
-		var choice string
-		if err := survey.AskOne(&survey.Select{
-			Message: "Select preset:",
-			Options: opts,
-		}, &choice); err != nil || choice == backOption {
-			return
+		if len(presets) > 0 {
+			options = append(options, "Manage groups")
 		}
-		if p, ok := optionMap[choice]; ok {
-			fmt.Println()
-			runPreset(p)
-		}
+		options = append(options, "Start new copy")
+		options = append(options, "Exit")
 
-	case "View presets":
-		viewPresets(presets)
-
-	case "Run a group":
-		opts := make([]string, 0, len(groups)+1)
-		groupMap := map[string]group{}
-		for _, g := range groups {
-			key := fmt.Sprintf("%-20s  (%s)", g.Name, g.summary())
-			opts = append(opts, key)
-			groupMap[key] = g
-		}
-		opts = append(opts, backOption)
-		var choice string
-		if err := survey.AskOne(&survey.Select{
-			Message: "Select group:",
-			Options: opts,
-		}, &choice); err != nil || choice == backOption {
-			return
-		}
-		if g, ok := groupMap[choice]; ok {
-			fmt.Println()
-			runGroup(g)
-		}
-
-	case "Manage groups":
-		manageGroups()
-
-	case "Start new copy":
-		srcDB, srcCfg, srcTable, err := setupSide("Source")
-		if err != nil {
-			fmt.Printf("error: %v\n", err)
-			return
-		}
-		defer srcDB.Close()
-		fmt.Println()
-
-		dstDB, dstCfg, dstTable, err := setupSide("Destination")
-		if err != nil {
-			fmt.Printf("error: %v\n", err)
-			return
-		}
-		defer dstDB.Close()
-		fmt.Println()
-
-		var truncate bool
-		if err := survey.AskOne(&survey.Confirm{
-			Message: fmt.Sprintf("Truncate destination (%s.%s) before copying?", dstCfg.Database, dstTable),
-		}, &truncate); err != nil {
-			return
-		}
-
-		truncateNote := ""
-		if truncate {
-			truncateNote = " (will truncate destination first)"
-		}
-		var confirm bool
-		if err := survey.AskOne(&survey.Confirm{
-			Message: fmt.Sprintf("Copy %s  →  %s%s ?",
-				fmt.Sprintf(srcCfg.label(), srcTable),
-				fmt.Sprintf(dstCfg.label(), dstTable),
-				truncateNote),
-		}, &confirm); err != nil || !confirm {
-			fmt.Println("Cancelled.")
-			return
-		}
-
-		offerSavePreset(srcCfg, srcTable, dstCfg, dstTable, truncate)
-
-		if truncate {
-			fmt.Printf("Truncating %s.%s...\n", dstCfg.Database, dstTable)
-			if err := truncateTable(dstDB, dstTable); err != nil {
-				fmt.Printf("error: %v\n", err)
+		action := "Start new copy"
+		if len(options) > 1 {
+			if err := survey.AskOne(&survey.Select{
+				Message: "What would you like to do?",
+				Options: options,
+			}, &action); err != nil {
 				return
 			}
 		}
-		fmt.Println("Copying...")
-		if err := copyTable(srcDB, srcTable, dstDB, dstTable); err != nil {
-			fmt.Printf("error: %v\n", err)
+		fmt.Println()
+
+		switch action {
+
+		case "Exit":
 			return
+
+		case "Run a preset":
+			optionMap := map[string]preset{}
+			opts := make([]string, 0, len(presets)+1)
+			for _, p := range presets {
+				key := fmt.Sprintf("%-20s  %s", p.Name, p.summary())
+				opts = append(opts, key)
+				optionMap[key] = p
+			}
+			opts = append(opts, backOption)
+			var choice string
+			if err := survey.AskOne(&survey.Select{
+				Message: "Select preset:",
+				Options: opts,
+			}, &choice); err != nil || choice == backOption {
+				continue
+			}
+			if p, ok := optionMap[choice]; ok {
+				fmt.Println()
+				runPreset(p)
+			}
+
+		case "View presets":
+			viewPresets(presets)
+
+		case "Run a group":
+			opts := make([]string, 0, len(groups)+1)
+			groupMap := map[string]group{}
+			for _, g := range groups {
+				key := fmt.Sprintf("%-20s  (%s)", g.Name, g.summary())
+				opts = append(opts, key)
+				groupMap[key] = g
+			}
+			opts = append(opts, backOption)
+			var choice string
+			if err := survey.AskOne(&survey.Select{
+				Message: "Select group:",
+				Options: opts,
+			}, &choice); err != nil || choice == backOption {
+				continue
+			}
+			if g, ok := groupMap[choice]; ok {
+				fmt.Println()
+				runGroup(g)
+			}
+
+		case "Manage groups":
+			manageGroups()
+
+		case "Start new copy":
+			srcDB, srcCfg, srcTable, err := setupSide("Source")
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+				continue
+			}
+			defer srcDB.Close()
+			fmt.Println()
+
+			dstDB, dstCfg, dstTable, err := setupSide("Destination")
+			if err != nil {
+				fmt.Printf("error: %v\n", err)
+				continue
+			}
+			defer dstDB.Close()
+			fmt.Println()
+
+			var truncate bool
+			if err := survey.AskOne(&survey.Confirm{
+				Message: fmt.Sprintf("Truncate destination (%s.%s) before copying?", dstCfg.Database, dstTable),
+			}, &truncate); err != nil {
+				continue
+			}
+
+			truncateNote := ""
+			if truncate {
+				truncateNote = " (will truncate destination first)"
+			}
+			var confirm bool
+			if err := survey.AskOne(&survey.Confirm{
+				Message: fmt.Sprintf("Copy %s  →  %s%s ?",
+					fmt.Sprintf(srcCfg.label(), srcTable),
+					fmt.Sprintf(dstCfg.label(), dstTable),
+					truncateNote),
+			}, &confirm); err != nil || !confirm {
+				fmt.Println("Cancelled.")
+				continue
+			}
+
+			offerSavePreset(srcCfg, srcTable, dstCfg, dstTable, truncate)
+
+			if truncate {
+				fmt.Printf("Truncating %s.%s...\n", dstCfg.Database, dstTable)
+				if err := truncateTable(dstDB, dstTable); err != nil {
+					fmt.Printf("error: %v\n", err)
+					continue
+				}
+			}
+			fmt.Println("Copying...")
+			if err := copyTable(srcDB, srcTable, dstDB, dstTable); err != nil {
+				fmt.Printf("error: %v\n", err)
+				continue
+			}
+			fmt.Println("Done!")
 		}
-		fmt.Println("Done!")
 	}
 }
